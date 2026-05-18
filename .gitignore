@@ -1,0 +1,23 @@
+# Python cache and bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local venvs
+.venv/
+venv/
+env/
+
+# Coverage / pytest
+.coverage
+.pytest_cache/
+htmlcov/
+
+# Note: out_*.png simulation outputs ARE checked in (see SUMMARY.md).
