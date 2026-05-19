@@ -328,6 +328,437 @@ class TestTheorem131_Conservation(unittest.TestCase):
 # ============================================================================
 # Theorem 14.1 -- Lorentz covariance (every term is a tensor).
 # ============================================================================
+class TestGeodesicEvolver(unittest.TestCase):
+    """The PSFT master equation in the inviscid limit reduces to the geodesic
+    equation (Theorem 12.1).  Test the time-integrated evolver against the
+    closed-form Schwarzschild perihelion-precession formula."""
+
+    def test_schwarzschild_orbit_recovers_einstein_precession(self):
+        from psft.evolve.geodesic import GeodesicState, GeodesicEvolver
+        M = 1.0
+        a = 100.0
+        e = 0.10
+        metric = SchwarzschildMetric(M=M, G=1.0, c=1.0)
+
+        # Construct initial state at perihelion (Newtonian limit, refined by
+        # the metric normalisation).
+        r_peri = a * (1.0 - e)
+        v_newt = math.sqrt(M * (1.0 + e) / (a * (1.0 - e)))
+        x0 = np.array([0.0, r_peri, 0.0, 0.0])
+        g = metric.g(x0)
+        coeff = g[0, 0] + g[2, 2] * v_newt ** 2
+        alpha = math.sqrt(-1.0 / coeff)
+        beta = alpha * v_newt
+        u0 = np.array([alpha, 0.0, beta, 0.0])
+
+        # Integrate ~3 orbits.
+        T = 2 * math.pi * math.sqrt(a ** 3 / M)
+        dt = T / 1500.0
+        n_steps = int(3 * T / dt)
+        evolver = GeodesicEvolver(metric=metric, dt=dt, fd_step=1e-2)
+        trajectory = evolver.trajectory(
+            GeodesicState(tau=0.0, x=x0, u=u0), n_steps,
+        )
+
+        # Detect perihelia and measure precession (using parabolic refinement).
+        rs = np.sqrt(trajectory[:, 1] ** 2 + trajectory[:, 2] ** 2)
+        phi = np.unwrap(np.arctan2(trajectory[:, 2], trajectory[:, 1]))
+        perihelia = []
+        for i in range(1, len(rs) - 1):
+            if rs[i] < rs[i - 1] and rs[i] < rs[i + 1]:
+                y0, y1, y2 = rs[i - 1], rs[i], rs[i + 1]
+                denom = y0 - 2 * y1 + y2
+                delta = 0.0 if abs(denom) < 1e-15 else 0.5 * (y0 - y2) / denom
+                if delta >= 0:
+                    phi_min = phi[i] + delta * (phi[i + 1] - phi[i])
+                else:
+                    phi_min = phi[i] + delta * (phi[i] - phi[i - 1])
+                perihelia.append(phi_min)
+
+        self.assertGreaterEqual(len(perihelia), 2)
+        # Average precession per orbit.
+        deltas = [(perihelia[k] - perihelia[0]) - 2 * math.pi * k
+                  for k in range(1, len(perihelia))]
+        delta_phi_measured = float(np.mean([d / k for k, d in enumerate(deltas, 1)]))
+        delta_phi_predicted = 6 * math.pi * M / (a * (1 - e ** 2))
+        rel_err = abs(delta_phi_measured - delta_phi_predicted) / delta_phi_predicted
+        self.assertLess(rel_err, 0.05,
+                        msg=f"precession {delta_phi_measured:.4f} vs Einstein "
+                            f"{delta_phi_predicted:.4f}, rel err {rel_err:.2%}")
+
+
+class TestRelativisticHydro1D(unittest.TestCase):
+    """1+1D inviscid PSFT master equation = relativistic Euler (Theorem 12.1)."""
+
+    def test_primitive_recovery_is_machine_precise(self):
+        """Round-trip (rho, p, v) -> (D, S, tau) -> (rho, p, v) should
+        recover the primitives to ~1e-12."""
+        from psft.evolve.hydro_1d import (
+            primitive_from_conservative, conservative_from_primitive,
+        )
+        rho = np.array([1.0, 5.0, 0.1, 2.5])
+        p = np.array([0.5, 2.0, 0.01, 0.8])
+        v = np.array([0.0, 0.5, -0.3, 0.9])
+        Gamma = 4.0 / 3.0
+        D, S, tau = conservative_from_primitive(rho, p, v, Gamma)
+        rho2, p2, v2, _ = primitive_from_conservative(D, S, tau, Gamma)
+        self.assertTrue(np.allclose(rho2, rho, rtol=1e-10))
+        self.assertTrue(np.allclose(p2, p, rtol=1e-10))
+        self.assertTrue(np.allclose(v2, v, atol=1e-10))
+
+    def test_static_equilibrium_is_preserved(self):
+        """Uniform rest fluid should remain at rest."""
+        from psft.evolve.hydro_1d import RelativisticEulerSolver1D
+        s = RelativisticEulerSolver1D(N=64, L=1.0, Gamma=4.0/3.0, cfl=0.4)
+        s.initialise(
+            rho_func=lambda x: np.ones_like(x),
+            p_func=lambda x: 0.1 * np.ones_like(x),
+            v_func=lambda x: np.zeros_like(x),
+        )
+        M0, E0, P0 = s.total_mass(), s.total_energy(), s.total_momentum()
+        s.evolve(t_end=0.5)
+        self.assertAlmostEqual(s.total_mass() / M0 - 1.0, 0.0, places=12)
+        self.assertAlmostEqual(s.total_energy() / E0 - 1.0, 0.0, places=12)
+        self.assertAlmostEqual(abs(s.total_momentum() - P0), 0.0, places=12)
+
+    def test_sound_speed_split_peaks(self):
+        """Initial v=0 density bump splits into left+right movers at +/-c_s."""
+        from psft.evolve.hydro_1d import RelativisticEulerSolver1D
+        Gamma = 4.0 / 3.0
+        rho0, p0 = 1.0, 0.1
+        h0 = 1.0 + Gamma * p0 / ((Gamma - 1.0) * rho0)
+        cs = math.sqrt(Gamma * p0 / (rho0 * h0))
+        s = RelativisticEulerSolver1D(N=1024, L=1.0, Gamma=Gamma, cfl=0.4)
+        sigma, x_c, amp = 0.04, 0.5, 0.005
+        gauss = lambda x: np.exp(-((x - x_c) / sigma) ** 2)
+        s.initialise(
+            rho_func=lambda x: rho0 + amp * gauss(x),
+            p_func=lambda x: p0 + (Gamma * p0 / (rho0 * h0)) * amp * gauss(x),
+            v_func=lambda x: np.zeros_like(x),
+        )
+        s.evolve(t_end=0.30 / cs)
+        rho_f, _, _, _ = s.primitives()
+        drho = rho_f - rho0
+        i_left = int(np.argmax(drho[s.x < x_c]))
+        i_right = int(np.argmax(drho[s.x > x_c]))
+        x_left = float(s.x[s.x < x_c][i_left])
+        x_right = float(s.x[s.x > x_c][i_right])
+        sep = x_right - x_left
+        expected = 2.0 * cs * s.t
+        self.assertLess(abs(sep - expected) / expected, 0.05)
+
+
+class TestRelativisticHydro3D(unittest.TestCase):
+    """3+1D inviscid PSFT master equation (extension of TestRelativisticHydro1D)."""
+
+    def test_primitive_recovery_3d(self):
+        from psft.evolve.hydro_3d import (
+            primitive_from_conservative_3d, conservative_from_primitive_3d,
+        )
+        rho = np.array([[[1.0, 5.0]], [[0.1, 2.5]]])
+        p = np.array([[[0.5, 2.0]], [[0.01, 0.8]]])
+        vx = np.array([[[0.0, 0.5]], [[-0.3, 0.4]]])
+        vy = np.array([[[0.0, 0.2]], [[0.1, -0.1]]])
+        vz = np.array([[[0.0, 0.1]], [[0.05, 0.2]]])
+        Gamma = 4.0 / 3.0
+        D, Sx, Sy, Sz, tau = conservative_from_primitive_3d(rho, p, vx, vy, vz, Gamma)
+        rho2, p2, vx2, vy2, vz2, _ = primitive_from_conservative_3d(D, Sx, Sy, Sz, tau, Gamma)
+        self.assertTrue(np.allclose(rho2, rho, rtol=1e-10))
+        self.assertTrue(np.allclose(p2, p, rtol=1e-10))
+        self.assertTrue(np.allclose(vx2, vx, atol=1e-10))
+        self.assertTrue(np.allclose(vy2, vy, atol=1e-10))
+        self.assertTrue(np.allclose(vz2, vz, atol=1e-10))
+
+    def test_static_equilibrium_3d(self):
+        from psft.evolve.hydro_3d import RelativisticEulerSolver3D
+        s = RelativisticEulerSolver3D(
+            Nx=16, Ny=16, Nz=16, Lx=1, Ly=1, Lz=1, Gamma=4 / 3, cfl=0.4,
+        )
+        s.initialise(
+            rho_func=lambda X, Y, Z: np.ones_like(X),
+            p_func=lambda X, Y, Z: 0.1 * np.ones_like(X),
+            vx_func=lambda X, Y, Z: np.zeros_like(X),
+            vy_func=lambda X, Y, Z: np.zeros_like(X),
+            vz_func=lambda X, Y, Z: np.zeros_like(X),
+        )
+        M0 = s.total_mass()
+        E0 = s.total_energy()
+        s.evolve(t_end=0.2)
+        self.assertAlmostEqual(s.total_mass() / M0 - 1.0, 0.0, places=12)
+        self.assertAlmostEqual(s.total_energy() / E0 - 1.0, 0.0, places=12)
+        Px, Py, Pz = s.total_momentum()
+        self.assertLess(max(abs(Px), abs(Py), abs(Pz)), 1e-12)
+
+
+class TestPhotonicField3D(unittest.TestCase):
+    """Step 4: photonic field on a 3D grid."""
+
+    def test_static_coulomb_is_stable(self):
+        """A discrete-Laplacian-balanced static Coulomb field should not
+        drift under Maxwell wave-equation evolution."""
+        from psft.evolve.photonic_field import PhotonicField3D
+        N = 24
+        L = 1.0
+        field = PhotonicField3D(
+            Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L, cfl=0.4, boundary="outflow",
+        )
+        sigma = 5 * field.dx
+        field.initialise_static_coulomb(L / 2, L / 2, L / 2, 1.0, sigma)
+        rho_q = field._laplacian(field.A_t) / (4 * math.pi)
+        zero = np.zeros_like(rho_q)
+        A_t0 = field.A_t.copy()
+        U0 = field.total_field_energy()
+        for _ in range(30):
+            field.step(j_t=rho_q, j_x=zero, j_y=zero, j_z=zero)
+        U_final = field.total_field_energy()
+        self.assertAlmostEqual((U_final - U0) / U0, 0.0, places=12)
+        self.assertTrue(np.allclose(field.A_t, A_t0, atol=1e-12))
+
+    def test_self_consistent_coupling_conserves_total_energy(self):
+        """Step 4.3: when the fluid sources its own photonic field
+        (j_a from rho_q and v^i) and the field's Lorentz force is added
+        to the fluid momentum equation, total energy U_fluid + U_EM is
+        conserved up to time-integrator error.
+
+        Pass: |dU_total / U_total_initial| < 5% over 40 steps at low
+        coupling and photon-CFL time-stepping.
+        """
+        from psft.evolve.hydro_3d import RelativisticEulerSolver3D
+        from psft.evolve.photonic_field import PhotonicField3D
+        N = 24
+        L = 1.0
+        pf = PhotonicField3D(Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L,
+                              cfl=0.4, boundary="periodic")
+        fluid = RelativisticEulerSolver3D(Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L,
+                                           Gamma=4 / 3, cfl=0.3,
+                                           boundary="periodic")
+        x0 = y0 = z0 = L / 2
+        sigma = 8 * pf.dx
+        rho_bg = 0.1
+        q = 0.05
+        fluid.initialise(
+            rho_func=lambda X, Y, Z: rho_bg + np.exp(-((X - x0) ** 2 + (Y - y0) ** 2 + (Z - z0) ** 2) / (2 * sigma ** 2)),
+            p_func=lambda X, Y, Z: 0.01 + 0 * X,
+            vx_func=lambda X, Y, Z: np.zeros_like(X),
+            vy_func=lambda X, Y, Z: np.zeros_like(X),
+            vz_func=lambda X, Y, Z: np.zeros_like(X),
+        )
+        # Solve discrete Poisson on initial state (periodic).
+        rho_now, _, _, _, _, _ = fluid.primitives()
+        rho_q_full = q * (rho_now - rho_bg)
+        mean_rho = float(np.mean(rho_q_full))
+        rho_q = rho_q_full - mean_rho
+        src = 4 * math.pi * rho_q
+        A = np.zeros_like(rho_q)
+        for _ in range(2000):
+            A = (np.roll(A, 1, axis=0) + np.roll(A, -1, axis=0)
+                 + np.roll(A, 1, axis=1) + np.roll(A, -1, axis=1)
+                 + np.roll(A, 1, axis=2) + np.roll(A, -1, axis=2)
+                 - src * pf.dx ** 2) / 6.0
+        pf.A_t = A
+
+        U0 = pf.total_field_energy() + fluid.total_energy()
+        dt = pf.cfl * pf.dx / math.sqrt(3.0)
+        for _ in range(40):
+            rho_now, _, vx, vy, vz, _ = fluid.primitives()
+            rho_q_step = q * (rho_now - rho_bg)
+            rho_q_step = rho_q_step - float(np.mean(rho_q_step))
+            fx, fy, fz = pf.lorentz_force(rho_q_step, vx, vy, vz)
+            fluid.step(dt=dt, body_force=(fx, fy, fz))
+            pf.step(dt=dt, j_t=rho_q_step,
+                    j_x=rho_q_step * vx, j_y=rho_q_step * vy, j_z=rho_q_step * vz)
+        U_final = pf.total_field_energy() + fluid.total_energy()
+        rel_drift = (U_final - U0) / U0
+        self.assertLess(abs(rel_drift), 0.05,
+                        msg=f"|dU/U_0| = {abs(rel_drift)*100:.3f}% (target < 5%)")
+
+    def test_step_44_opposite_charges_attract(self):
+        """Step 4.4 (toy hydrogen atom): two opposite-sign charge blobs
+        coupled to a self-consistent photonic field develop equal and
+        opposite x-momenta on the two half-spaces, with the electron
+        half acquiring NEGATIVE x-momentum (toward the proton).
+
+        Confirms (i) the Lorentz attraction sign is correct, (ii) Newton's
+        third law holds for the EM-fluid coupling to machine precision,
+        and (iii) topology (U(1) winding) is preserved.
+        """
+        from psft.evolve.hydro_3d import RelativisticEulerSolver3D
+        from psft.evolve.photonic_field import PhotonicField3D
+        from psft.evolve.gauge_sectors import (
+            ScalarAdvector3D, winding_number_in_plane,
+        )
+        N = 24
+        L = 1.0
+        dx = L / N
+        sigma = 3 * dx
+        sep = 0.4
+        x_p = L / 2 - sep / 2
+        x_e = L / 2 + sep / 2
+        y0 = z0 = L / 2
+        rho_bg = 0.05
+        p_bg = 0.005
+
+        fluid = RelativisticEulerSolver3D(
+            Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L, Gamma=4 / 3, cfl=0.3,
+            boundary="periodic",
+        )
+        fluid.initialise(
+            rho_func=lambda X, Y, Z: rho_bg
+                + np.exp(-((X - x_p) ** 2 + (Y - y0) ** 2 + (Z - z0) ** 2) / (2 * sigma ** 2))
+                + np.exp(-((X - x_e) ** 2 + (Y - y0) ** 2 + (Z - z0) ** 2) / (2 * sigma ** 2)),
+            p_func=lambda X, Y, Z: p_bg + 0 * X,
+            vx_func=lambda X, Y, Z: np.zeros_like(X),
+            vy_func=lambda X, Y, Z: np.zeros_like(X),
+            vz_func=lambda X, Y, Z: np.zeros_like(X),
+        )
+
+        tracer = ScalarAdvector3D(
+            Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L, cfl=0.4, boundary="periodic",
+        )
+        rho_q_init = (
+            np.exp(-((tracer.X - x_p) ** 2 + (tracer.Y - y0) ** 2 + (tracer.Z - z0) ** 2) / (2 * sigma ** 2))
+            - np.exp(-((tracer.X - x_e) ** 2 + (tracer.Y - y0) ** 2 + (tracer.Z - z0) ** 2) / (2 * sigma ** 2))
+        )
+        tracer.set_scalar(rho_q_init)
+
+        sigma_A = ScalarAdvector3D(
+            Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L, cfl=0.4, boundary="periodic",
+        )
+        r_perp = np.sqrt((sigma_A.X - x_e) ** 2 + (sigma_A.Y - y0) ** 2)
+        ph = np.arctan2(sigma_A.Y - y0, sigma_A.X - x_e)
+        amp = np.tanh(r_perp / (3 * dx))
+        sigma_A.set_scalar(np.stack([amp * np.cos(-ph), amp * np.sin(-ph)], axis=0))
+
+        pf = PhotonicField3D(
+            Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L, cfl=0.4, boundary="periodic",
+        )
+        src = 4 * math.pi * (rho_q_init - float(np.mean(rho_q_init)))
+        A = np.zeros_like(rho_q_init)
+        for _ in range(2000):
+            A = (np.roll(A, 1, axis=0) + np.roll(A, -1, axis=0)
+                 + np.roll(A, 1, axis=1) + np.roll(A, -1, axis=1)
+                 + np.roll(A, 1, axis=2) + np.roll(A, -1, axis=2)
+                 - src * dx ** 2) / 6.0
+        pf.A_t = A
+
+        mask_e = fluid.X > L / 2
+        winding_init = winding_number_in_plane(
+            sigma_A.phi[0] + 1j * sigma_A.phi[1], axis=2, slice_idx=N // 2,
+            center=(int(x_e / dx), int(y0 / dx)), radius_frac=0.2,
+        )
+
+        dt = pf.cfl * dx / math.sqrt(3.0)
+        for _ in range(30):
+            rho_now, _, vx, vy, vz, _ = fluid.primitives()
+            rho_q_full = tracer.phi
+            rho_q = rho_q_full - float(np.mean(rho_q_full))
+            fx, fy, fz = pf.lorentz_force(rho_q, vx, vy, vz)
+            fluid.step(dt=dt, body_force=(fx, fy, fz))
+            _, _, vx_a, vy_a, vz_a, _ = fluid.primitives()
+            tracer.set_velocity(
+                lambda X, Y, Z, vx=vx_a: vx,
+                lambda X, Y, Z, vy=vy_a: vy,
+                lambda X, Y, Z, vz=vz_a: vz,
+            )
+            tracer.step(dt=dt)
+            sigma_A.set_velocity(
+                lambda X, Y, Z, vx=vx_a: vx,
+                lambda X, Y, Z, vy=vy_a: vy,
+                lambda X, Y, Z, vz=vz_a: vz,
+            )
+            sigma_A.step(dt=dt)
+            pf.step(dt=dt, j_t=rho_q,
+                    j_x=rho_q * vx, j_y=rho_q * vy, j_z=rho_q * vz)
+
+        P_x_e = float(np.sum(fluid.Sx[mask_e])) * dx ** 3
+        P_x_p = float(np.sum(fluid.Sx[~mask_e])) * dx ** 3
+        winding_final = winding_number_in_plane(
+            sigma_A.phi[0] + 1j * sigma_A.phi[1], axis=2, slice_idx=N // 2,
+            center=(int(x_e / dx), int(y0 / dx)), radius_frac=0.2,
+        )
+        # (i) Lorentz attraction sign:
+        self.assertLess(P_x_e, 0.0,
+                        msg=f"electron-half P_x should be negative, got {P_x_e:.3e}")
+        self.assertGreater(P_x_p, 0.0,
+                           msg=f"proton-half P_x should be positive, got {P_x_p:.3e}")
+        # (ii) Newton's 3rd law:
+        sym_violation = abs(P_x_e + P_x_p) / max(abs(P_x_e), 1e-30)
+        self.assertLess(sym_violation, 1e-6,
+                        msg=f"Newton's 3rd law violated: {sym_violation:.2e}")
+        # (iii) Topology preserved:
+        self.assertEqual(winding_final, winding_init,
+                         msg=f"winding changed: {winding_init} -> {winding_final}")
+
+    def test_e_field_points_outward_from_positive_charge(self):
+        """Sign convention: a positive charge at the centre produces E
+        pointing radially outward.  Verify direction at a point along +x."""
+        from psft.evolve.photonic_field import PhotonicField3D
+        N = 32
+        L = 1.0
+        field = PhotonicField3D(
+            Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L, cfl=0.4, boundary="outflow",
+        )
+        field.initialise_static_coulomb(L / 2, L / 2, L / 2, 1.0, 5 * field.dx)
+        Ex, Ey, Ez = field.E_field()
+        # Test point off-centre along x.  Because (L/2, L/2, L/2) does not
+        # land exactly on a cell centre when N is even, there is a small
+        # off-axis residual; we check that Ex dominates and is positive.
+        ix = N // 2 + N // 4
+        iy = N // 2
+        iz = N // 2
+        Ex_pt = float(Ex[ix, iy, iz])
+        Ey_pt = float(Ey[ix, iy, iz])
+        Ez_pt = float(Ez[ix, iy, iz])
+        self.assertGreater(Ex_pt, 0.0,
+                           msg="E_x should be positive (outward) for +Q on +x side")
+        # On-axis residuals tiny relative to E_x.
+        E_mag = math.sqrt(Ex_pt ** 2 + Ey_pt ** 2 + Ez_pt ** 2)
+        cos_theta = Ex_pt / E_mag
+        self.assertGreater(cos_theta, 0.9,
+                           msg=f"E vector should be ~aligned with +x (cos = {cos_theta:.3f})")
+
+
+class TestGaugeSectorAdvection(unittest.TestCase):
+    """Step 3.2: scalar gauge fields on a 3D grid preserve topology."""
+
+    def test_winding_preserved_under_static_evolution(self):
+        from psft.evolve.gauge_sectors import (
+            ScalarAdvector3D, winding_number_in_plane,
+        )
+        N = 32
+        L = 1.0
+        advector = ScalarAdvector3D(
+            Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L, cfl=0.4, boundary="periodic",
+        )
+        advector.set_velocity(
+            lambda X, Y, Z: np.zeros_like(X),
+            lambda X, Y, Z: np.zeros_like(X),
+            lambda X, Y, Z: np.zeros_like(X),
+        )
+        for n_target in (-2, -1, 0, 1, 2):
+            x0, y0 = L / 2, L / 2
+            r = np.sqrt((advector.X - x0) ** 2 + (advector.Y - y0) ** 2)
+            phi = np.arctan2(advector.Y - y0, advector.X - x0)
+            amp = np.tanh(r / 0.06)
+            field = np.stack([amp * np.cos(n_target * phi),
+                               amp * np.sin(n_target * phi)], axis=0)
+            advector.set_scalar(field)
+            w_init = winding_number_in_plane(
+                field[0] + 1j * field[1], axis=2, slice_idx=N // 2,
+                center=(N // 2, N // 2), radius_frac=0.3,
+            )
+            dt = 0.4 * (L / N) / 1.0
+            for _ in range(20):
+                advector.step(dt=dt)
+            w_final = winding_number_in_plane(
+                advector.phi[0] + 1j * advector.phi[1],
+                axis=2, slice_idx=N // 2,
+                center=(N // 2, N // 2), radius_frac=0.3,
+            )
+            self.assertEqual(w_final, w_init,
+                             msg=f"winding {n_target}: init {w_init} -> final {w_final}")
+
+
 class TestTheorem141_LorentzCovariance(unittest.TestCase):
 
     @staticmethod

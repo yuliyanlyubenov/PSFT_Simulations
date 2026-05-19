@@ -16,8 +16,14 @@ class TestExamplesRun(unittest.TestCase):
 def _make_case(filename):
     def _test(self):
         path = os.path.join(EX, filename)
+        # Force PSFT_HIGH_RES=0 in the subprocess so examples that have a
+        # production / smoke-test toggle pick the fast path.  Production
+        # numbers are produced by manually invoking the script.
+        env = os.environ.copy()
+        env["PSFT_HIGH_RES"] = "0"
         result = subprocess.run(
-            [sys.executable, path], capture_output=True, text=True, timeout=120, cwd=SIM,
+            [sys.executable, path], capture_output=True, text=True,
+            timeout=120, cwd=SIM, env=env,
         )
         self.assertEqual(result.returncode, 0,
                          msg=f"{filename} failed:\nSTDOUT:\n{result.stdout}\n"
