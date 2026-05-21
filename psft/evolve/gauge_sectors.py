@@ -67,6 +67,31 @@ class ScalarAdvector3D:
         self.vy = vy_func(self.X, self.Y, self.Z)
         self.vz = vz_func(self.X, self.Y, self.Z)
 
+    def set_velocity_curved(self, v_phys: np.ndarray, geom):
+        """Set the advection velocity on a curved background.
+
+        The matter 3-velocity v^i_phys is converted to the coordinate
+        transport velocity u^i = alpha v^i - beta^i appropriate for
+        a scalar passively advected on the 3+1 slice with lapse alpha
+        and shift beta^i.  This is the curved-background analogue of
+        `set_velocity`; on Minkowski (alpha=1, beta=0) the two are
+        identical.  This is Phase 2b of the curved-background
+        extension.
+
+        Parameters
+        ----------
+        v_phys : (3, Nx, Ny, Nz)
+            Physical matter 3-velocity.
+        geom : SpatialGeometry
+            Lapse + shift + spatial metric (we use only alpha and
+            beta here; the metric enters via the volume factor when
+            we move to a fully conservative formulation).
+        """
+        u = geom.transport_velocity(v_phys)
+        self.vx = u[0]
+        self.vy = u[1]
+        self.vz = u[2]
+
     def set_scalar(self, phi: np.ndarray):
         self.phi = phi
         self.t = 0.0

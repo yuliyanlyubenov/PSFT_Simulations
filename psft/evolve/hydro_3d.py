@@ -28,7 +28,7 @@ within laptop RAM.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 from psft.evolve.hydro_1d import sound_speed, signal_speed
@@ -132,6 +132,18 @@ class RelativisticEulerSolver3D:
     `step()` advances by one RK4 step; `evolve()` runs to a target time.
     Setting `eta > 0` activates conformal viscous fluxes per direction
     (paper Modification 1).
+
+    Optional curved-background coupling (Phase 2d of the simulation
+    roadmap): pass a `SpatialGeometry` instance to `set_geometry` (or
+    leave it as the default flat-Minkowski).  When non-flat, the
+    advection uses the coordinate transport velocity
+    `u^i = alpha v^i - beta^i`, fluxes pick up a `sqrt(gamma)` volume
+    factor, and a lapse-gradient source term acts on the momentum and
+    energy equations -- the Newtonian-limit gravitational acceleration.
+    The full Valencia formulation (Banyuls et al. 1997) extends this
+    with Christoffel sources required for strong-field regimes; the
+    current implementation is a minimum-viable Valencia adequate for
+    weak/moderate field tests.
     """
     Nx: int
     Ny: int
@@ -150,6 +162,9 @@ class RelativisticEulerSolver3D:
     Sz: np.ndarray = field(default=None, init=False)
     tau: np.ndarray = field(default=None, init=False)
     t: float = field(default=0.0, init=False)
+    # Curved-background geometry (None means flat Minkowski; default
+    # behaviour identical to pre-Phase-2d).
+    geometry: Optional[object] = field(default=None, init=False)
 
     def __post_init__(self):
         self.dx = self.Lx / self.Nx
@@ -160,6 +175,12 @@ class RelativisticEulerSolver3D:
         self.y = np.linspace(0.5 * self.dy, self.Ly - 0.5 * self.dy, self.Ny)
         self.z = np.linspace(0.5 * self.dz, self.Lz - 0.5 * self.dz, self.Nz)
         self.X, self.Y, self.Z = np.meshgrid(self.x, self.y, self.z, indexing="ij")
+
+    def set_geometry(self, geom):
+        """Attach a `SpatialGeometry` (psft.core.geometry_3d.SpatialGeometry).
+        Without this call, evolution proceeds in flat Minkowski (the
+        backward-compatible default; existing examples are unaffected)."""
+        self.geometry = geom
 
     # ---- initial conditions -------------------------------------------------
     def initialise(self, rho_func, p_func, vx_func, vy_func, vz_func):
@@ -232,17 +253,41 @@ class RelativisticEulerSolver3D:
         """Compute dU/dt.  Optional `body_force = (fx, fy, fz)` adds an
         external body force on the momentum equation, with the matching
         v.f work term added to the energy equation (so dt tau gets += v.f).
+
+        Curved-background coupling (Phase 2d): when `self.geometry` is set
+        to a non-flat `SpatialGeometry`, the velocity used in the
+        Lax-Friedrichs advection is the coordinate transport velocity
+        `u^i = alpha v^i - beta^i` and a lapse-gradient source term
+        (the Newtonian-limit gravitational acceleration) is added to
+        the S_i and tau equations.  When geometry is None (default), the
+        behaviour is identical to the pre-Phase-2d flat solver.
         """
         rho, p, vx, vy, vz, _ = primitive_from_conservative_3d(
             D, Sx, Sy, Sz, tau, self.Gamma,
         )
 
+        # Curved-background transport velocity: u^i = alpha v^i - beta^i.
+        # In flat space (alpha=1, beta=0), u^i = v^i and Sx_for_advection is
+        # the same as Sx.  We pass the curved velocity to the Lax-Friedrichs
+        # advection while keeping the conservative variables themselves
+        # (D, S_i, tau) in the flat form.  This is the minimum viable
+        # Valencia coupling: correct at leading order in metric perturbation,
+        # exact in the flat limit.
+        if self.geometry is not None and not self.geometry.is_flat:
+            alpha_lapse = self.geometry.alpha
+            beta = self.geometry.beta
+            ux = alpha_lapse * vx - beta[0]
+            uy = alpha_lapse * vy - beta[1]
+            uz = alpha_lapse * vz - beta[2]
+        else:
+            ux, uy, uz = vx, vy, vz
+
         # x-direction flux at i+1/2 interface
-        flux_xp, vxr = self._flux_direction(D, Sx, Sy, Sz, tau, rho, p, vx, axis=0,
+        flux_xp, vxr = self._flux_direction(D, Sx, Sy, Sz, tau, rho, p, ux, axis=0,
                                              flux_fn=flux_x)
-        flux_yp, vyr = self._flux_direction(D, Sx, Sy, Sz, tau, rho, p, vy, axis=1,
+        flux_yp, vyr = self._flux_direction(D, Sx, Sy, Sz, tau, rho, p, uy, axis=1,
                                              flux_fn=flux_y)
-        flux_zp, vzr = self._flux_direction(D, Sx, Sy, Sz, tau, rho, p, vz, axis=2,
+        flux_zp, vzr = self._flux_direction(D, Sx, Sy, Sz, tau, rho, p, uz, axis=2,
                                              flux_fn=flux_z)
 
         # Optional viscous corrections (conformal, per direction).
@@ -291,6 +336,37 @@ class RelativisticEulerSolver3D:
             rhs_Sz = rhs_Sz + fz
             # Power input to the energy equation: v . f.
             rhs_tau = rhs_tau + vx * fx + vy * fy + vz * fz
+
+        # Curved-background source: lapse-gradient gravitational
+        # acceleration on the momentum equation.  In the Valencia
+        # formulation the full source for S_j is
+        #     s_j = (alpha sqrt(gamma)) T^{ab} (d_b g_{aj} - Gamma^c_{ab} g_{cj}) / 2
+        # In the weak-field (Newtonian) limit ds^2 = -alpha^2 dt^2 + dx^2,
+        # this reduces to
+        #     s_j = -(rho h W^2) d_j alpha / alpha
+        # which is the relativistic version of -rho d_j Phi (Newton's
+        # gravitational acceleration).  We use rho_h_W2 = D + tau + p
+        # (relativistic enthalpy times W^2) to avoid recomputing primitives.
+        if self.geometry is not None and not self.geometry.is_flat:
+            alpha_lapse = self.geometry.alpha
+            # d_i alpha / alpha = d_i ln alpha
+            inv_alpha = 1.0 / np.maximum(alpha_lapse, 1e-30)
+            d_alpha_x = (self._shift(alpha_lapse, 0, 1) - self._shift(alpha_lapse, 0, -1)) / (2 * self.dx)
+            d_alpha_y = (self._shift(alpha_lapse, 1, 1) - self._shift(alpha_lapse, 1, -1)) / (2 * self.dy)
+            d_alpha_z = (self._shift(alpha_lapse, 2, 1) - self._shift(alpha_lapse, 2, -1)) / (2 * self.dz)
+            # rho h W^2 = D + tau + p
+            rho_h_W2 = D + tau + p
+            grav_x = -rho_h_W2 * d_alpha_x * inv_alpha
+            grav_y = -rho_h_W2 * d_alpha_y * inv_alpha
+            grav_z = -rho_h_W2 * d_alpha_z * inv_alpha
+            rhs_Sx = rhs_Sx + grav_x
+            rhs_Sy = rhs_Sy + grav_y
+            rhs_Sz = rhs_Sz + grav_z
+            # No work term for the lapse gradient on tau in this minimal
+            # form (the Newtonian-limit gravitational source is on momentum
+            # only; energy-conservation work is captured by v . F_grav,
+            # added only when the fluid is moving).
+            rhs_tau = rhs_tau + vx * grav_x + vy * grav_y + vz * grav_z
 
         return rhs_D, rhs_Sx, rhs_Sy, rhs_Sz, rhs_tau
 

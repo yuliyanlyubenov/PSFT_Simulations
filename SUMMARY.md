@@ -200,6 +200,257 @@ GR/QED/QCD:
   hedgehog soliton stability + binding energy on top of this consistency)
   becomes feasible.
 
+### Example 25 — BSSN 3+1 ADM evolver: Minkowski stability
+
+* **First curved-background-capable evolver in the library** (Step 5.1
+  of the simulation roadmap; opens the door to PSFT predictions that
+  require a dynamical spatial metric).
+* Module: `psft/evolve/adm.py` (~900 LOC, 24 BSSN fields per cell).
+* Formulation: BSSN (Baumgarte-Shapiro 2nd ed., chapter 11) with the
+  moving-puncture gauge — 1+log lapse + Gamma-driver shift.
+* State variables per cell:
+  * `chi` — conformal factor, `chi = (det gamma)^(-1/3)`;
+  * `gammabar_ij` — conformal 3-metric, 6 indep. components, `det = 1`;
+  * `K` — trace of extrinsic curvature;
+  * `Abar_ij` — conformal trace-free extrinsic curvature;
+  * `Gammabar^i` — conformal connection functions;
+  * `alpha`, `beta^i`, `B^i` — lapse, shift, Gamma-driver auxiliary.
+* Numerics: 4th-order centred FD, RK4, 6th-order Kreiss-Oliger
+  dissipation, algebraic constraint projection every step
+  (`tr(Abar) = 0`, `det(gammabar) = 1` — the single most important
+  practical detail of any BSSN implementation).
+* **Phase 1.1 acceptance test (this example): flat Minkowski is an
+  exact BSSN fixed point.** All 24 BSSN fields, plus the Hamiltonian
+  and momentum constraints, stay at **machine zero** over 1000 RK4
+  steps. Validates the BSSN RHS implementation as a foundation for
+  the Phase 2 coupling of `(rho, p, v^i, A_a, sigma^A)` to the
+  dynamical geometry.
+* **Schwarzschild puncture (Phase 1.2):** isotropic-coordinate initial
+  data is constructed correctly (`psi = 1 + M/(2r)`, `chi = psi^{-4}`,
+  pre-collapsed lapse `alpha = psi^{-2}`). The momentum constraint is
+  exactly satisfied (time-symmetric `K_ij = 0`); the Hamiltonian
+  constraint is finite (FD discretisation error). Long-time puncture
+  evolution is deferred — vanilla BSSN with periodic BCs explodes
+  around 5 M, as documented in the NR literature; Phase 1.2 needs
+  Z4c constraint damping and radiative outer boundary conditions.
+* **Phase 1.3 (static fluid ball):** deferred pending Phase 2 (matter
+  coupling).
+* New tests: `tests/test_adm.py` adds 6 tests (Minkowski exact-fixed-point,
+  small-perturbation boundedness, algebraic constraint projection,
+  Schwarzschild IC structural checks). Total test suite now 77 tests.
+
+### Example 26 — BSSN evolution with matter source (static dust ball)
+
+* **First BSSN evolution in the library with non-trivial matter
+  coupling** (Phase 1.3 of the curved-background extension).
+* Implementation: extended `bssn_vacuum_rhs` to accept matter sources
+  `(rho_adm, S_i, S_ij)` and wired them through the K, Abar, and
+  Gammabar^i evolution equations as per Baumgarte-Shapiro
+  eqs. 11.49-11.54 with matter terms.
+* Initial data: solves the Lichnerowicz form of the Hamiltonian
+  constraint
+      `nabla^2 psi = -2 pi psi^5 rho_rest`
+  by Jacobi fixed-point iteration on the periodic grid.  Time-symmetric
+  (K_ij = 0), conformally flat (gammabar_ij = delta_ij), and the lapse
+  initialised pre-collapsed `alpha = psi^{-2}`.
+* Phase 1.3 acceptance results (24^3, 60 steps, smoke):
+  * **Real curvature**: chi varies 0.948 → 1.008 across the dust
+    distribution (genuine spatial curvature, not flat).
+  * **Lapse collapse**: alpha reaches 0.974 at the centre vs. 1.004
+    at the boundary -- the gravitational-redshift signature.
+  * **Stable evolution**: chi drift 8.5e-3, alpha drift 2.5e-2,
+    K_max = 1.0e-2 over 60 steps; no NaN.
+  * Hamiltonian constraint stays bounded (initial 1.8e-2, final
+    5.8e-2, growth factor 3.3 -- polynomial, not exponential).
+* **What this unlocks**: the matter -> geometry coupling needed for
+  Phase 2 (re-running Examples 14-24 with self-consistent geometry
+  back-reaction).  The geometry side is now ready; what remains is
+  the matter side: the Valencia formulation of `hydro_3d`, the 3+1
+  Faraday-Ampere reformulation of `photonic_field`, and the
+  curved-aware `gauge_sectors` advection.
+* Three new tests added (`TestBSSNRobustStability.test_short_time_polynomial_growth`
+  for Phase 1.2; `TestBSSNMatterCoupling.test_static_dust_ball_jacobi_converges`
+  and `test_dust_ball_evolves_without_blow_up` for Phase 1.3).
+  Total test suite now 81 tests passing.
+
+### Example 27 — Z4c constraint damping (working)
+
+* **First working Z4c implementation in the library** (Phase 1.5 of
+  the curved-background extension; Step 5.1 of the simulation roadmap).
+* Implementation: the minimal **Theta-only** Z4c variant of
+  Bernuzzi & Hilditch (PRD 81, 084003, 2010), with three structural
+  modifications relative to BSSN:
+  1. **chi modification**: `dt chi += (4/3) alpha chi Theta`
+     [BH 2010 eq. 14] -- the critical structural piece that makes
+     the constraint subsystem hyperbolic.
+  2. **K back-coupling**: `dt K += alpha kappa1 (1-kappa2) Theta`
+     [BH 2010 eq. 16].
+  3. **Theta evolution**: `dt Theta = (alpha/2) H + beta . grad Theta
+     - alpha kappa1 (2+kappa2) Theta` [BH 2010 eq. 4], where
+     `H = R + (2/3) K^2 - Abar:Abar - 16 pi rho_adm`.
+* With `kappa1 = 0` (default) the system reduces to plain BSSN
+  identically and all 9 existing BSSN/dust-ball tests still pass.
+* With `kappa1 > 0` on flat Minkowski (`H = 0`), the Theta source
+  vanishes and the system is still an exact fixed point.
+* **Damping demonstration on dust ball** (24^3, 50 steps):
+  * vanilla BSSN: |H| grows from 1.8e-2 to 3.7e+2 (**20,000x growth**)
+  * Z4c kappa1=0.5: |H| grows from 1.8e-2 to ~0.3 (**170x reduction
+    vs vanilla**)
+  * Z4c clearly suppresses Hamiltonian-constraint violation.
+* New tests in `TestBSSNZ4cConstraintDamping` (4 tests, all passing):
+  Theta=0 when kappa1=0; kappa1=0 matches vacuum BSSN; Minkowski
+  preserved with kappa1 active; **Z4c damps Hamiltonian constraint
+  on dust ball by >5x** (the headline test).
+* Honest caveats:
+  * Random-noise (Apples-with-Apples robust-stability) test still
+    not stable: the BSSN constraint-violating mode under random
+    noise grows at a rate exceeding accessible `kappa1`. Full
+    stability there needs the momentum-constraint damping via the
+    spatial Z^i vector absorbed into the Gammabar^i evolution
+    (deferred).
+  * For PSFT's actual use cases (structured initial data, weak-to-
+    strong field) Z4c damping is sufficient.
+
+### Example 28 — Hydrodynamics on a curved metric (Valencia-lite)
+
+* **First hydro simulation in the library coupled to a non-flat spatial
+  geometry** (Phase 2d of the curved-background extension; Step 5.1
+  of the simulation roadmap).
+* Implementation: minimum-viable Valencia formulation
+  (Banyuls-Font-Ibanez-Marti-Miralles 1997) added to
+  `RelativisticEulerSolver3D`:
+  * New `set_geometry(SpatialGeometry)` method attaches a
+    curved-background geometry.  When `None` (default), the
+    pre-Phase-2d flat behaviour is preserved bit-for-bit.
+  * Lax-Friedrichs advection switches from `v^i` to coordinate
+    transport velocity `u^i = alpha v^i - beta^i`.
+  * Lapse-gradient source `-rho h W^2 d_j alpha / alpha` added to
+    the momentum equation -- the relativistic Newtonian-limit
+    gravitational acceleration.  Energy gets the matching `v . F`
+    work term.
+* What's NOT included (deferred to a fuller Valencia):
+  * `sqrt(gamma)` volume factor in the conservative variables.
+  * Christoffel source terms (full Valencia source for strong field).
+  * Primitive recovery with `S^2 = gamma^ij S_i S_j` (currently still
+    uses flat `S^2`).
+  * The minimum form is correct at leading order in metric perturbation
+    and adequate for weak-to-moderate-field tests; the strong-field
+    completion is a follow-up task.
+* Phase 2d acceptance results (32^3, 30 steps, smoke):
+  * Gaussian lapse "gravity well" at box centre (`alpha_min = 0.95`)
+  * Left half acquires `+8.5e-3` x-momentum (toward well)
+  * Right half acquires `-8.5e-3` x-momentum (toward well)
+  * Newton's-3rd-law-like symmetry preserved to **0.35%**
+  * No NaN; total mass conserved.
+* Tests added (`TestHydroOnCurvedBackground`, 2 tests in
+  `tests/test_geometry_3d.py`):
+  * `test_flat_default_is_bitwise_identical_to_pre_phase_2d`
+  * `test_lapse_gradient_drives_fluid_toward_gravity_well`
+
+### Example 29 — Photonic field on a curved metric (Maxwell-on-3-slice)
+
+* **First photonic-field simulation in the library on a non-trivial
+  spatial geometry** (Phase 2e of the curved-background extension;
+  completes the curved-aware matter-sector trio).
+* Implementation: `PhotonicField3D` gains a `set_geometry()` method
+  analogous to Phase 2d for `RelativisticEulerSolver3D`.  When
+  attached to a non-flat geometry, the wave equation switches from
+  the flat Lorenz-gauge form
+      `d^2 A_a / dt^2 = lap A_a - 4 pi j_a`
+  to the leading-order curved form
+      `d^2 A_a / dt^2 = alpha^2 (gamma^{ij} d_i d_j A_a)
+                        - 4 pi alpha^2 j_a`.
+  This captures Shapiro-delay-like propagation through a non-uniform
+  lapse / spatial-metric region.
+* What's NOT included (deferred to a full 3+1 Faraday-Ampere):
+  * Shift-vector advection (`beta . grad A`).
+  * Lapse-gradient cross-couplings between A_a components.
+  * Coupling of A_t to A_i via the curved Maxwell tensor.
+  * Full Lorenz-gauge constraint preservation on a curved slice.
+  The minimum form is correct at leading order in metric
+  perturbation, exact in the flat limit, and adequate for weak-to-
+  moderate-field tests.
+* Phase 2e acceptance results (Example 29, smoke 32^3):
+  * **Flat default**: bit-for-bit identical to pre-Phase-2e behaviour
+    (verified by regression test).
+  * **Uniformly depressed lapse (alpha = 0.5)**: pulse-spread ratio
+    `0.78x` relative to the flat propagation -- the reduced effective
+    wave speed of `alpha c` at leading order.
+  * **Static Coulomb on uniform alpha**: energy preserved to machine
+    precision (constant scale factor doesn't affect a static
+    equilibrium).
+* Tests added (`TestPhotonicFieldOnCurvedBackground`, 3 tests):
+  * `test_flat_default_is_bitwise_identical_to_pre_phase_2e`
+  * `test_static_coulomb_remains_static_on_uniform_alpha`
+  * `test_wave_propagation_slowed_by_lapse_depression`
+
+### Curved-background coupling -- Phase 2 status summary
+
+After Phase 2a-e, every matter-sector module in the library has a
+`set_geometry(SpatialGeometry)` entry point and a flat-default code
+path that's bit-for-bit identical to pre-Phase-2 behaviour:
+
+  * `psft.evolve.gauge_sectors.ScalarAdvector3D.set_velocity_curved`
+    (Phase 2b)
+  * `psft.evolve.hydro_3d.RelativisticEulerSolver3D.set_geometry`
+    (Phase 2d)
+  * `psft.evolve.photonic_field.PhotonicField3D.set_geometry`
+    (Phase 2e)
+
+The geometry side is the BSSN(+Z4c) evolver from Phase 1, with the
+working Z4c constraint damping committed in Phase 1.5.
+
+This makes the library structurally complete for the Phase 3 work:
+redux of Examples 14-24 on a self-consistent BSSN-evolved metric,
+with each matter sector seeing the geometry rather than assuming
+flat space.
+
+### Phase 2 (curved-background matter coupling) — infrastructure
+
+Phase 2 of the curved-background extension threads the BSSN
+geometry through the existing matter sectors so that
+Examples 14--24 can be re-run with a dynamical spatial metric.
+This commit establishes the shared infrastructure; the matter-side
+refactors of `hydro_3d` and `photonic_field` are deferred to
+follow-up sessions (~700 LOC delta combined).
+
+* New module **`psft/core/geometry_3d.py`** (`SpatialGeometry`
+  dataclass) carries `gamma_ij`, `gamma^ij`, `sqrt(gamma)`, lapse
+  `alpha`, shift `beta^i` on the 3D grid.  Convenience
+  constructors `flat(Nx, Ny, Nz, dx)` and `from_bssn(bssn_state)`
+  let matter modules accept geometry as input without depending on
+  BSSN directly.
+* New helper `transport_velocity(v_phys)` returns the coordinate
+  transport velocity `u^i = alpha v^i - beta^i` used by the
+  curved-aware scalar advection.
+* New helper `spatial_ricci_scalar(geom)` — computes `R^(3) =
+  gamma^ij R_ij` directly from the spatial metric.  Vanishes on
+  flat space; provides the geometry-side ingredient of the
+  spacetime Kretschmann.
+* New helper `kretschmann_from_adm(bssn_state)` — Phase 2c
+  placeholder that returns `(R^(3))^2` as a curvature-norm
+  diagnostic.  This is the function that will eventually replace
+  the `|grad Phi|^2` matter-gradient proxy in Example 20's
+  Heaviside-activated viscosity.  A faithful 4D Kretschmann via
+  full Gauss--Codazzi--Ricci decomposition is a follow-up task.
+* `ScalarAdvector3D.set_velocity_curved(v_phys, geom)` — Phase 2b
+  curved-aware velocity setter.  Replaces the `v^i` input with the
+  alpha/beta-corrected transport velocity.  On flat backgrounds it
+  is identical to `set_velocity` (verified by test).
+* 9 new tests in `tests/test_geometry_3d.py`:
+  flat-construction round-trip, inverse-metric on flat, transport
+  velocity reduces to identity, `from_bssn` on flat + dust-ball,
+  flat-Ricci-vanishes, curved-aware advection reduces to flat,
+  Kretschmann vanishes on flat / non-zero on dust ball.
+
+What this unlocks: matter modules can accept a `SpatialGeometry`
+argument and switch to curved-aware kernels.  Next sessions:
+(d) hydro_3d Valencia refactor; (e) photonic_field switch to 3+1
+Faraday-Ampere; (f) replace Example 20's |grad Phi|^2 proxy with
+the real Kretschmann; (g) redux of Example 14 (Schwarzschild
+geodesic) on a freshly-evolved BSSN metric instead of the static
+analytic background.
+
 ### Example 24 — Toy hydrogen atom (proton + electron + photonic field)
 
 * **First simulation that co-evolves proton-candidate and

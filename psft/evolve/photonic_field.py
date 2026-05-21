@@ -32,6 +32,19 @@ from typing import Callable, Optional, Tuple
 import math
 import numpy as np
 
+# Phase 2e: optional curved-background coupling via SpatialGeometry.
+# The PhotonicField3D class gains a `set_geometry` method analogous to
+# the one on RelativisticEulerSolver3D.  When a non-flat geometry is
+# attached, the wave equation switches from
+#     d^2 A_a / dt^2 = lap A_a - 4 pi j_a    (flat Minkowski)
+# to the leading-order curved form
+#     d^2 A_a / dt^2 = alpha^2 (gamma^{ij} d_i d_j A_a)
+#                      - 4 pi alpha^2 j_a   (curved spatial slice)
+# This captures Shapiro-delay-like propagation through a non-uniform
+# lapse / spatial-metric region.  Shift-vector advection and curvature-
+# induced cross-couplings between A_a components are deferred to a full
+# 3+1 Faraday-Ampere reformulation.
+
 
 # ---------------------------------------------------------------------------
 # Smoothed-Coulomb closed-form initialiser
@@ -111,6 +124,9 @@ class PhotonicField3D:
     pi_y: np.ndarray = field(default=None, init=False)
     pi_z: np.ndarray = field(default=None, init=False)
     t: float = field(default=0.0, init=False)
+    # Curved-background geometry (None means flat Minkowski; default
+    # behaviour identical to pre-Phase-2e).
+    geometry: Optional[object] = field(default=None, init=False)
 
     def __post_init__(self):
         self.dx = self.Lx / self.Nx
@@ -129,6 +145,16 @@ class PhotonicField3D:
         self.pi_x = zero.copy()
         self.pi_y = zero.copy()
         self.pi_z = zero.copy()
+
+    def set_geometry(self, geom):
+        """Attach a `SpatialGeometry` (psft.core.geometry_3d).  When
+        non-flat, the wave equation switches from the flat form
+        `d^2 A / dt^2 = lap A - 4 pi j_a` to the leading-order curved
+        form `d^2 A / dt^2 = alpha^2 (gamma^{ij} d_i d_j A) - 4 pi
+        alpha^2 j_a`.  Without this call (default), evolution proceeds
+        in flat Minkowski exactly as before -- existing examples
+        (21, 22, 23, 24) are unaffected."""
+        self.geometry = geom
 
     # ---- initial conditions -------------------------------------------------
     def initialise_static_coulomb(self, x0: float, y0: float, z0: float,
@@ -220,17 +246,71 @@ class PhotonicField3D:
         return (E2 + B2) / (8 * math.pi)
 
     # ---- evolution ----------------------------------------------------------
+    def _curved_laplacian(self, F: np.ndarray, gamma_inv_3x3: np.ndarray) -> np.ndarray:
+        """Curved-metric Laplacian: gamma^{ij} d_i d_j F.
+
+        Uses second-order centred finite differences for the second
+        derivatives and the same for mixed derivatives.  Drops the
+        Laplace-Beltrami correction term involving d_i sqrt(gamma) for
+        simplicity (negligible at leading order in metric perturbation);
+        this can be added in a follow-up if needed.
+        """
+        if self.boundary == "periodic":
+            d2_xx = (np.roll(F, 1, axis=0) + np.roll(F, -1, axis=0) - 2 * F) / self.dx ** 2
+            d2_yy = (np.roll(F, 1, axis=1) + np.roll(F, -1, axis=1) - 2 * F) / self.dy ** 2
+            d2_zz = (np.roll(F, 1, axis=2) + np.roll(F, -1, axis=2) - 2 * F) / self.dz ** 2
+            # Mixed: d^2 F / (dx_i dx_j) = d_i (d_j F)
+            d_x = self._gradient(F, axis=0)
+            d_y = self._gradient(F, axis=1)
+            d_z = self._gradient(F, axis=2)
+            d2_xy = self._gradient(d_y, axis=0)
+            d2_xz = self._gradient(d_z, axis=0)
+            d2_yz = self._gradient(d_z, axis=1)
+            # gamma_inv_3x3 has shape (3, 3, Nx, Ny, Nz)
+            return (
+                gamma_inv_3x3[0, 0] * d2_xx
+                + gamma_inv_3x3[1, 1] * d2_yy
+                + gamma_inv_3x3[2, 2] * d2_zz
+                + 2 * gamma_inv_3x3[0, 1] * d2_xy
+                + 2 * gamma_inv_3x3[0, 2] * d2_xz
+                + 2 * gamma_inv_3x3[1, 2] * d2_yz
+            )
+        else:
+            # Fallback: just call the flat Laplacian (outflow BC).
+            # Curved-metric outflow boundaries need careful handling
+            # which is deferred.
+            return self._laplacian(F)
+
     def rhs(self, A_t, A_x, A_y, A_z, pi_t, pi_x, pi_y, pi_z,
              j_t, j_x, j_y, j_z):
-        """Wave equation RHS: dt A = pi, dt pi = lap A - 4 pi j."""
+        """Wave equation RHS: dt A = pi, dt pi = lap A - 4 pi j.
+
+        Curved-background coupling (Phase 2e): when `self.geometry` is
+        set to a non-flat `SpatialGeometry`, the spatial Laplacian
+        becomes the curved-metric form `gamma^{ij} d_i d_j` and the
+        whole RHS is multiplied by `alpha^2` (lapse squared) to
+        capture the leading-order proper-time vs coordinate-time
+        ratio.  In flat Minkowski (alpha = 1, gamma^{ij} = delta^{ij})
+        this reduces exactly to the original Lorenz-gauge wave equation.
+        """
         dA_t = pi_t
         dA_x = pi_x
         dA_y = pi_y
         dA_z = pi_z
-        dpi_t = self._laplacian(A_t) - 4 * math.pi * j_t
-        dpi_x = self._laplacian(A_x) - 4 * math.pi * j_x
-        dpi_y = self._laplacian(A_y) - 4 * math.pi * j_y
-        dpi_z = self._laplacian(A_z) - 4 * math.pi * j_z
+        if self.geometry is not None and not self.geometry.is_flat:
+            # Curved spatial Laplacian.
+            from psft.core.geometry_3d import _sym_to_3x3
+            gamma_inv_3x3 = _sym_to_3x3(self.geometry.gamma_inv)
+            alpha2 = self.geometry.alpha ** 2
+            dpi_t = alpha2 * (self._curved_laplacian(A_t, gamma_inv_3x3) - 4 * math.pi * j_t)
+            dpi_x = alpha2 * (self._curved_laplacian(A_x, gamma_inv_3x3) - 4 * math.pi * j_x)
+            dpi_y = alpha2 * (self._curved_laplacian(A_y, gamma_inv_3x3) - 4 * math.pi * j_y)
+            dpi_z = alpha2 * (self._curved_laplacian(A_z, gamma_inv_3x3) - 4 * math.pi * j_z)
+        else:
+            dpi_t = self._laplacian(A_t) - 4 * math.pi * j_t
+            dpi_x = self._laplacian(A_x) - 4 * math.pi * j_x
+            dpi_y = self._laplacian(A_y) - 4 * math.pi * j_y
+            dpi_z = self._laplacian(A_z) - 4 * math.pi * j_z
         return dA_t, dA_x, dA_y, dA_z, dpi_t, dpi_x, dpi_y, dpi_z
 
     def step(self, dt: float = None,
