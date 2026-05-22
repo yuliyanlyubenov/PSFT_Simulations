@@ -452,6 +452,57 @@ GR/QED/QCD:
   dynamical version with physically-radiating released energy is
   the natural next-iteration simulation.
 
+### Phase 4 follow-ups (Examples 32-34): Wheeler-geon, radiation outflow, literal Kretschmann
+
+After Examples 30-31 landed the static-energy versions of the two
+Section 7.4 forward predictions, this batch adds the natural next-iteration
+demonstrations: a NUMERICALLY-EVOLVED metric (not just analytic
+Schwarzschild), a TIME-RESOLVED radiation outflow (not just static
+energy bookkeeping), and the LITERAL Kretschmann (not the proxy).
+
+* **Example 32 -- Self-gravitating compact blob + null-geodesic
+  ray-tracing**.  A static metric is constructed via the Phase 1.3
+  Lichnerowicz solver, wrapped in a `BSSNGriddedMetric` with trilinear
+  interpolation, and traced via the existing `GeodesicEvolver`.  At
+  moderate compactness (M_int/sigma ~ 0.05), null geodesics show clear
+  gravitational focusing toward the matter core: small-b photons pass
+  through the high-curvature interior, large-b photons stay in the
+  periphery.  Null condition `|u . u|` preserved to 1e-5 over the
+  evolution.  All 5 PASS criteria met.  Full strong-field trapping
+  (Wheeler-geon photon-sphere capture) is the natural follow-on,
+  requiring full-Valencia BSSN.
+
+* **Example 33 -- Dynamical photonic-field radiation outflow**.  Initial:
+  static Coulomb field of a Gaussian +Q on a 32^3 grid.  At t = 0 the
+  source rho_q is removed and the field evolves freely.  Interior U_EM
+  (r < 0.25L) drops by **96.3%** as radiation exits.  The proper
+  conserved quantity -- the scalar-wave energy
+  `E_wave = (1/2) integral (pi_t^2 + |grad A_t|^2) d^3 x` -- is preserved
+  to **0.71%** over 100 RK4 steps (FD-precision-limited).  Honest
+  disclosure: the EM energy `(|E|^2 + |B|^2)/8 pi` is NOT conserved
+  after source removal, because the (A_a, pi_a) Lorenz-gauge formulation
+  dynamically violates Lorenz gauge in this regime; the scalar-wave
+  energy IS the right conservation quantity.  4 PASS criteria.
+
+* **Example 34 -- Literal Kretschmann from BSSN-evolved metric**.  Solves
+  Lichnerowicz for a Gaussian source, computes `K = R_abcd R^abcd` via
+  `kretschmann_from_adm()`, compares against the matter-gradient proxy
+  `|grad rho|^2` used by Example 20.  The literal K is finite, peaks
+  at the matter core, and correlates with the proxy (Pearson > 0.7).
+  Heaviside `Theta(K - Kc)` activation regions overlap (Jaccard > 0.3).
+  This unblocks the literal-K version of the Example 20 flux-tube
+  simulation: once the matter+geometry coupled BSSN evolution is in
+  place, the proxy retires and the literal `R_abcd R^abcd` enters the
+  Postulate 3 Heaviside trigger.  5 PASS criteria.
+
+These three examples complete the Phase 4 forward-prediction set as
+documented in paper Section 7.4: Wheeler-geon trapping geometry on
+numerical metric (extension of Example 30), time-resolved matter-light
+release (extension of Example 31), and the structural prerequisite for
+the Example 20 literal-K redux.  Three new tests added in
+`TestSelfGravitatingGeonGeodesics`, `TestDynamicalRadiationOutflow`,
+`TestLiteralKretschmannDemonstration`.
+
 ### Curved-background coupling -- Phase 2 status summary
 
 After Phase 2a-e, every matter-sector module in the library has a

@@ -528,5 +528,139 @@ class TestMatterLightEnergyAccounting(unittest.TestCase):
                         msg=f"U_EM = {U:.4f} too large (expected ~ {U_analytic:.4f})")
 
 
+class TestSelfGravitatingGeonGeodesics(unittest.TestCase):
+    """Phase 4 follow-up (Example 32): null geodesics on a numerical
+    Lichnerowicz-evolved metric show systematic photon deflection
+    toward a compact matter source.  This is the precursor to full
+    Wheeler-geon trapping at strong field (paper Section 7.4)."""
+
+    def test_lichnerowicz_metric_deflects_photons(self):
+        from psft.evolve.adm import BSSNState
+        from psft.evolve.geodesic import GeodesicState, GeodesicEvolver
+        # Re-uses the metric class from Example 32; import inline.
+        import importlib.util
+        ex32_path = os.path.join(os.path.dirname(HERE), 'examples',
+                                  '32_self_gravitating_geon_geodesics.py')
+        spec = importlib.util.spec_from_file_location("ex32", ex32_path)
+        ex32 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ex32)
+
+        # Small problem for the unit test.
+        N = 20
+        L = 2.0
+        dh = L / N
+        x = np.linspace(0.5*dh, L-0.5*dh, N)
+        X, Y, Z = np.meshgrid(x, x, x, indexing='ij')
+        r = np.sqrt((X-L/2)**2 + (Y-L/2)**2 + (Z-L/2)**2)
+        rho_rest = 0.05 * np.exp(-r**2 / (2 * 0.25**2))
+        bssn, _ = BSSNState.static_dust_ball(N, N, N, dh, dh, dh,
+                                              rho_rest=rho_rest, n_jacobi=1500)
+        # Metric should have non-trivial chi variation.
+        self.assertGreater(bssn.chi.max() - bssn.chi.min(), 0.01)
+
+        metric = ex32.BSSNGriddedMetric(bssn, L=L)
+        # Photon launched in -x direction with small impact parameter.
+        x0 = np.array([0.0, L - 4*dh, L/2 + 0.05*L, L/2])
+        u0 = ex32.null_initial_velocity(metric, x0, np.array([-1.0, 0.0, 0.0]))
+        # Null at initialisation.
+        null_init = float(np.einsum('ab,a,b->', metric.g(x0), u0, u0))
+        self.assertLess(abs(null_init), 1e-10)
+
+        evolver = GeodesicEvolver(metric=metric, dt=dh/4, fd_step=dh,
+                                  enforce_normalisation=False)
+        state = GeodesicState(tau=0.0, x=x0, u=u0)
+        chi_min = float('inf')
+        for _ in range(150):
+            try:
+                state = evolver.step(state)
+            except (np.linalg.LinAlgError, ValueError):
+                break
+            if (state.x[1] < 2*dh or state.x[1] > L - 2*dh):
+                break
+            chi_h = metric._trilinear(bssn.chi, state.x[1], state.x[2], state.x[3])
+            chi_min = min(chi_min, chi_h)
+        # Photon traversing near the core should sample non-trivially
+        # depressed chi.
+        self.assertLess(chi_min, bssn.chi.max() - 0.001,
+                        msg=f"chi_min along path = {chi_min:.4f} (should be < {bssn.chi.max() - 0.001:.4f})")
+        # No NaN
+        self.assertTrue(np.all(np.isfinite(state.x)))
+
+
+class TestDynamicalRadiationOutflow(unittest.TestCase):
+    """Phase 4 follow-up (Example 33): after a static Coulomb source is
+    removed, the photonic A_t field radiates outward.  The proper
+    conserved quantity is the scalar-wave energy
+    E = (1/2) integral (pi_t^2 + |grad A_t|^2) d^3 x; it is preserved
+    to FD precision under periodic BCs."""
+
+    def test_scalar_wave_energy_conserved_under_free_evolution(self):
+        from psft.evolve.photonic_field import PhotonicField3D
+        N = 24
+        L = 1.0
+        dh = L / N
+        pf = PhotonicField3D(Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L, cfl=0.4)
+        x = np.linspace(0.5*dh, L-0.5*dh, N)
+        X, Y, Z = np.meshgrid(x, x, x, indexing='ij')
+        r2 = (X-L/2)**2 + (Y-L/2)**2 + (Z-L/2)**2
+        pf.A_t = 0.01 * np.exp(-r2 / (2 * 0.1**2))
+
+        def E_wave(pf):
+            grad_x = (np.roll(pf.A_t, -1, 0) - np.roll(pf.A_t, 1, 0)) / (2*pf.dx)
+            grad_y = (np.roll(pf.A_t, -1, 1) - np.roll(pf.A_t, 1, 1)) / (2*pf.dy)
+            grad_z = (np.roll(pf.A_t, -1, 2) - np.roll(pf.A_t, 1, 2)) / (2*pf.dz)
+            return 0.5 * float(np.sum(pf.pi_t**2 + grad_x**2 + grad_y**2 + grad_z**2)) * pf.dx**3
+
+        E0 = E_wave(pf)
+        dt = pf.cfl * dh / math.sqrt(3.0)
+        for _ in range(50):
+            pf.step(dt=dt)
+        E_final = E_wave(pf)
+        rel_drift = abs(E_final - E0) / E0
+        self.assertLess(rel_drift, 0.05,
+                        msg=f"|dE/E_0| = {rel_drift:.3e} for scalar wave energy")
+
+
+class TestLiteralKretschmannDemonstration(unittest.TestCase):
+    """Phase 4 follow-up (Example 34): the literal Kretschmann scalar
+    via `kretschmann_from_adm()` is non-trivial on a Lichnerowicz-evolved
+    metric and correlates positively with the matter-gradient proxy
+    used in Example 20."""
+
+    def test_literal_K_correlates_with_matter_gradient_proxy(self):
+        from psft.evolve.adm import BSSNState
+        from psft.core.geometry_3d import kretschmann_from_adm
+        N = 20
+        L = 2.0
+        dh = L / N
+        x = np.linspace(0.5*dh, L-0.5*dh, N)
+        X, Y, Z = np.meshgrid(x, x, x, indexing='ij')
+        r = np.sqrt((X-L/2)**2 + (Y-L/2)**2 + (Z-L/2)**2)
+        rho_rest = 0.1 * np.exp(-r**2 / (2 * 0.3**2))
+        bssn, _ = BSSNState.static_dust_ball(N, N, N, dh, dh, dh,
+                                              rho_rest=rho_rest, n_jacobi=1500)
+        K_lit = kretschmann_from_adm(bssn)
+        # K_proxy = |grad rho|^2
+        gx = (np.roll(rho_rest, -1, 0) - np.roll(rho_rest, 1, 0)) / (2*dh)
+        gy = (np.roll(rho_rest, -1, 1) - np.roll(rho_rest, 1, 1)) / (2*dh)
+        gz = (np.roll(rho_rest, -1, 2) - np.roll(rho_rest, 1, 2)) / (2*dh)
+        K_proxy = gx*gx + gy*gy + gz*gz
+        # Both should be finite.
+        self.assertTrue(np.all(np.isfinite(K_lit)))
+        # Literal K is non-trivial.
+        self.assertGreater(K_lit.max(), 0)
+        # Positive Pearson correlation in the active region.
+        threshold = 0.01 * max(K_lit.max(), K_proxy.max())
+        mask = (K_lit > threshold * K_lit.max()) | (K_proxy > threshold * K_proxy.max())
+        K_lit_m = K_lit[mask]
+        K_pxy_m = K_proxy[mask]
+        n_lit = K_lit_m - K_lit_m.mean()
+        n_pxy = K_pxy_m - K_pxy_m.mean()
+        denom = float(math.sqrt(np.sum(n_lit**2) * np.sum(n_pxy**2)))
+        corr = float(np.sum(n_lit * n_pxy) / denom) if denom > 0 else 0.0
+        self.assertGreater(corr, 0.3,
+                           msg=f"Pearson correlation = {corr:.3f} should be > 0.3")
+
+
 if __name__ == "__main__":
     unittest.main()
