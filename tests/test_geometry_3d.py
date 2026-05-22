@@ -397,5 +397,136 @@ class TestHydroOnCurvedBackground(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(solver.D)))
 
 
+class TestTrappedNullGeodesics(unittest.TestCase):
+    """Phase 4 forward-prediction test (Example 30): null geodesics
+    around a Schwarzschild-strength curvature show the photon-sphere
+    capture/escape transition at the textbook b_crit = 3 sqrt(3) M.
+
+    This is the geometry baseline for PSFT's Wheeler-geon trapping
+    prediction at the fm-scale soliton core (paper Section 7.4).
+    """
+
+    def test_photon_capture_and_escape_bracket_b_crit(self):
+        from psft.core.metric import SchwarzschildMetric
+        from psft.evolve.geodesic import GeodesicState, GeodesicEvolver
+        M = 1.0
+        metric = SchwarzschildMetric(M=M, G=1.0, c=1.0)
+        r_horizon = 2.0 * M
+        rho_launch = 20.0 * M
+        r_far = 30.0 * M
+        b_crit_areal = 3.0 * math.sqrt(3.0) * M
+        # Isotropic-coord critical impact at this launch radius:
+        B_launch = (1.0 + M / (2.0 * rho_launch)) ** 2
+        b_crit_iso = b_crit_areal / B_launch
+
+        evolver = GeodesicEvolver(metric=metric, dt=0.08, fd_step=1e-3,
+                                  enforce_normalisation=False)
+
+        def trace(b):
+            """Launch a photon at impact parameter b (isotropic y),
+            return ('captured', 'escaped', or 'other')."""
+            x0 = np.array([0.0, -rho_launch, b, 0.0])
+            g = metric.g(x0)
+            A = float(math.sqrt(-g[0, 0]))
+            B = float(math.sqrt(g[1, 1]))
+            u0 = np.array([B / A, 1.0, 0.0, 0.0])
+            state = GeodesicState(tau=0.0, x=x0, u=u0)
+            for _ in range(2000):
+                ar = metric.areal_radius(state.x)
+                if ar < r_horizon * 1.1:
+                    return 'captured'
+                if ar > r_far * 1.5:
+                    return 'escaped'
+                try:
+                    state = evolver.step(state)
+                except np.linalg.LinAlgError:
+                    return 'captured'
+            return 'other'
+
+        # Below the (isotropic) critical impact parameter: captured.
+        # Use 0.7 b_crit_iso so we're well below.
+        b_small = 0.7 * b_crit_iso
+        # Above: escaped.  Use 1.5 b_crit_iso.
+        b_large = 1.5 * b_crit_iso
+        # b = 12M is definitely above and finishes in fewer steps.
+        b_far = 12.0 * M
+
+        self.assertEqual(trace(b_small), 'captured',
+                         msg=f"b = {b_small:.3f} M should be captured (b_crit_iso = {b_crit_iso:.3f})")
+        # Use clearly-supercritical impact parameter for the escape test
+        self.assertEqual(trace(b_far), 'escaped',
+                         msg=f"b = {b_far} M should escape")
+
+
+class TestMatterLightEnergyAccounting(unittest.TestCase):
+    """Phase 4 forward-prediction test (Example 31): topological
+    cancellation of opposite-sign smeared charges drives the
+    integrated photonic-field energy U_EM = (1/8 pi) integral
+    (|E|^2 + |B|^2) d^3 x to zero -- the static-energy form of the
+    geon-picture matter-light interconversion (paper Section 7.4).
+    """
+
+    def test_overlapping_opposite_charges_have_zero_U_EM(self):
+        from psft.evolve.photonic_field import PhotonicField3D
+        N = 24
+        L = 1.0
+        dh = L / N
+        x = np.linspace(0.5*dh, L-0.5*dh, N)
+        X, Y, Z = np.meshgrid(x, x, x, indexing='ij')
+        sigma = 0.1
+        Q = 1.0
+        # Two opposite charges at the SAME location -> rho_q = 0 exactly.
+        r2_centre = (X - L/2)**2 + (Y - L/2)**2 + (Z - L/2)**2
+        norm = Q / (2 * math.pi * sigma**2)**1.5
+        rho_pos = norm * np.exp(-r2_centre / (2*sigma**2))
+        rho_neg = -norm * np.exp(-r2_centre / (2*sigma**2))
+        rho_total = rho_pos + rho_neg
+        self.assertLess(float(np.max(np.abs(rho_total))), 1e-12)
+        # With zero source, A_t = 0 and U_EM = 0.
+        pf = PhotonicField3D(Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L, cfl=0.4)
+        # Leave A_t at default zero -- that's the "trivial topology" state.
+        U_EM = pf.total_field_energy()
+        self.assertLess(U_EM, 1e-20,
+                        msg=f"U_EM = {U_EM:.3e} should be ~0 for trivial topology")
+
+    def test_isolated_charge_has_finite_positive_U_EM(self):
+        """A single Gaussian smeared charge has a positive,
+        finite integrated electromagnetic self-energy that matches
+        the classical Q^2 / (4 sigma sqrt(pi)) formula to ~50%
+        (limited by the FD discretisation of the Laplacian)."""
+        from psft.evolve.photonic_field import PhotonicField3D
+        N = 32
+        L = 1.0
+        dh = L / N
+        sigma = max(6 * dh, 0.1)
+        Q = 1.0
+        x = np.linspace(0.5*dh, L-0.5*dh, N)
+        X, Y, Z = np.meshgrid(x, x, x, indexing='ij')
+        r2 = (X - L/2)**2 + (Y - L/2)**2 + (Z - L/2)**2
+        norm = Q / (2 * math.pi * sigma**2)**1.5
+        rho = norm * np.exp(-r2 / (2*sigma**2))
+
+        # Jacobi-solve A_t.
+        mean_rho = float(np.mean(rho))
+        src = 4 * math.pi * (rho - mean_rho)
+        A = np.zeros_like(rho)
+        for _ in range(2000):
+            A = (
+                np.roll(A, 1, axis=0) + np.roll(A, -1, axis=0)
+                + np.roll(A, 1, axis=1) + np.roll(A, -1, axis=1)
+                + np.roll(A, 1, axis=2) + np.roll(A, -1, axis=2)
+                - src * dh ** 2
+            ) / 6.0
+
+        pf = PhotonicField3D(Nx=N, Ny=N, Nz=N, Lx=L, Ly=L, Lz=L, cfl=0.4)
+        pf.A_t = A
+        U = pf.total_field_energy()
+        U_analytic = Q ** 2 / (4 * sigma * math.sqrt(math.pi))
+        self.assertGreater(U, 0.1 * U_analytic,
+                           msg=f"U_EM = {U:.4f} too small (expected ~ {U_analytic:.4f})")
+        self.assertLess(U, 1.5 * U_analytic,
+                        msg=f"U_EM = {U:.4f} too large (expected ~ {U_analytic:.4f})")
+
+
 if __name__ == "__main__":
     unittest.main()

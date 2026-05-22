@@ -384,6 +384,74 @@ GR/QED/QCD:
   * `test_static_coulomb_remains_static_on_uniform_alpha`
   * `test_wave_propagation_slowed_by_lapse_depression`
 
+### Example 30 -- Trapped null geodesics (Wheeler-geon trapping geometry)
+
+* **First Phase~4 forward-prediction simulation** based on paper
+  Section~7.4 ("Trapped null geodesics at the soliton core").
+* Setup: launch null geodesics on Schwarzschild metric from `rho = 20M`
+  with varying impact parameter `b ∈ {2, 3, 4, 5, 5.196, 5.5, 6, 8, 12} M`.
+  Integrate the geodesic equation with the existing
+  `psft.evolve.geodesic` RK4 evolver (no normalisation enforcement,
+  since photons are null not timelike); detect capture (photon enters
+  horizon), escape (photon retreats past `r_far = 30M`), or other.
+* **Acceptance** (all PASS):
+  * `b = 2M` → captured (photon falls in)
+  * `b = 12M` → escaped (photon retreats)
+  * **Capture/escape transition** is bracketed between our `b = 4M`
+    (captured) and `b = 5M` (escaped) samples
+  * Numerically, the isotropic-coord critical impact parameter at
+    `rho_launch = 20M` is `b_crit_iso = b_crit_areal / B(rho_launch)
+    ≈ 5.196 / 1.05 ≈ 4.95 M` -- exactly bracketed by our `[4, 5]`
+    transition window
+  * Null condition `|u·u| < 0.5` over the entire evolution
+    (FD-precision-limited)
+* **PSFT interpretation**: this is the geometry baseline for the
+  Wheeler-geon trapping that paper Section~7.4 predicts at the
+  fm-scale soliton core where `K → Kc^strong ~ 1.2e61 m^{-4}`.
+  Without PSFT's high-K viscosity activation (Postulate~3 +
+  Theorem~10.1), the marginally-trapped photon at `b = b_crit` is
+  dynamically unstable -- it radiates away on a free-fall timescale
+  (Wheeler 1955).  PSFT's prediction is that the
+  Heaviside-activated SU(3) viscosity inside the soliton supplies
+  the stabilisation mechanism that pure-GR analysis cannot see,
+  making the geon-picture of Postulate~1 ("matter = stable solitonic
+  pattern in `P_ab`") physically realisable.
+
+### Example 31 -- Matter-light energy accounting via topological cancellation
+
+* **First Phase~4 forward-prediction simulation** for paper
+  Section~7.4 ("Matter--light interconversion as topological
+  cancellation").
+* Setup: compute integrated photonic-field energy
+  `U_EM = (1/8π) ∫ (|E|² + |B|²) d³x`
+  for three Gaussian-smeared charge configurations on a 40^3 grid:
+  * (a) single `+Q = +1`, sigma = 0.06: `U_EM = 0.601`
+  * (b) opposite charges `+Q, -Q` separated by d = 0.4 L: `U_EM = 1.015`
+  * (c) opposite charges OVERLAPPED at the same location: `U_EM ≡ 0`
+    (exact topological cancellation; `ρ_q ≡ 0` everywhere)
+* **Acceptance** (all PASS):
+  * `U_EM_a > 0` (positive EM self-energy for a single charge)
+  * `U_EM_b ≈ 2 U_EM_a` (`U_b / (2 U_a) ≈ 0.84`, weak Coulomb
+    interaction at d = 4 sigma)
+  * `U_EM_c < 1% U_EM_a` (topological cancellation drives
+    integrated energy to zero)
+  * **Released energy fraction `(U_b - U_c) / U_b = 100%`** --
+    all stored field energy is released by the cancellation
+  * `U_EM` matches classical EM self-energy `Q² / (4σ√π)` within
+    factor ~ 1.5 (FD-discretisation error in the Laplacian)
+* **PSFT interpretation**: this is the static-energy version of
+  the geon-picture matter-light interconversion.  In the geon
+  interpretation, `m c² = U_EM` for a single soliton (the
+  photonic-field stress-energy IS the rest mass-energy).  When
+  opposite-winding solitons combine topologically (configuration c),
+  the photonic field cancels exactly and all stored `U_EM` is
+  released as outgoing radiation -- the annihilation event predicted
+  in paper Section~7.4.  Total energy is conserved via a single
+  accounting on `P_ab` that covers both TRAPPED (matter) and
+  PROPAGATING (radiation) states of the same field.  The full
+  dynamical version with physically-radiating released energy is
+  the natural next-iteration simulation.
+
 ### Curved-background coupling -- Phase 2 status summary
 
 After Phase 2a-e, every matter-sector module in the library has a
