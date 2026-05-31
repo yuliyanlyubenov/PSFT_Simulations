@@ -14,12 +14,17 @@ which experiments are next.
 
 | Category | Count | Status |
 |---|---|---|
-| Core modules (`psft/`) | 16 Python files, ~1500 LOC | All exercised by tests |
+| Core modules (`psft/`) | 29 Python files, ~4750 LOC | All exercised by tests |
 | Unit tests (`tests/test_basics.py`) | 20 | All pass |
-| Theorem-validation tests (`tests/test_theorems.py`) | 25 | All pass |
-| Example simulations (`examples/0*.py`, `examples/1*.py`, `examples/2*.py`) | 23 | All run end-to-end |
-| Example smoke tests (`tests/test_examples.py`) | 23 | All pass |
-| **Total automated tests** | **68** | **All pass** |
+| ADM/BSSN tests (`tests/test_adm.py`) | 13 | All pass |
+| 3D-geometry tests (`tests/test_geometry_3d.py`) | 20 | All pass |
+| Theorem-validation tests (`tests/test_theorems.py`) | 26 | All pass |
+| Example simulations (`examples/NN_*.py`) | 34 | All run end-to-end |
+| Example smoke tests (`tests/test_examples.py`) | 34 | All pass |
+| **Total automated tests** | **113** | **All pass** |
+
+(The `geon_matter/` module of Section 8 ships its own self-testing scripts,
+not counted in this core suite.)
 
 Dependencies: `numpy`, `matplotlib`. No `scipy`, no compiled extensions.
 
@@ -271,7 +276,7 @@ GR/QED/QCD:
 * Three new tests added (`TestBSSNRobustStability.test_short_time_polynomial_growth`
   for Phase 1.2; `TestBSSNMatterCoupling.test_static_dust_ball_jacobi_converges`
   and `test_dust_ball_evolves_without_blow_up` for Phase 1.3).
-  Total test suite now 81 tests passing.
+  Total test suite at this milestone: 81 tests passing (now 113; see Section 1).
 
 ### Example 27 — Z4c constraint damping (working)
 
@@ -864,7 +869,39 @@ master equation on a 3D grid with realistic matter sources.
 
 ---
 
-## 8. Repository
+## 8. Geon-matter module (`geon_matter/`)
+
+A focused study of how **matter, mass, spin, and quantum phenomena emerge
+deterministically from light** in PSFT — a particle as a *geon* (light bound by
+the high-curvature SU(3) viscosity), worked through with the same idea → math →
+generalisation → experiment → prediction discipline. Highlights:
+
+* **Special relativity, derived.** `E=γmc²`, time dilation, length contraction,
+  the mass shell, and de Broglie `λ=h/p` all fall out of confined light moving
+  at `c` (`geon_matter/examples/sim1,sim2`).
+* **Spin and the magnetic moment.** Tree-level `g=2` from circulating
+  charge-light, the `g−2` anomaly as an `α/π` photonic-loop series, and
+  half-integer spin `2S=n` from charge + topological winding (`sim3,sim6,sim8`).
+* **Deterministic quantisation (no Born rule).** The hydrogen spectrum from a
+  standing-wave/topological condition; the Bell/CHSH Tsirelson bound `2√2` and
+  no-signalling from the nonlocal spacetime fluid (`sim10,sim11`).
+* **Bound-state project (`geon_matter/bound_state/`, Phases 1–7).** A real
+  charged field soliton solved from its equation, dynamically stable, binding
+  by the Kc viscous phase; the bag scale reproduces the spin-averaged baryon
+  mass to **0.1%** from the single input `l_strong`; the absolute fluid noise
+  spectrum (`ξ=1 fm`, `T≈197 MeV`) from the fluctuation-dissipation theorem +
+  the KSS bound; and the entanglement coherence `V(t)=e^{−Γt}` derived from
+  two-soliton dynamics.
+
+Supporting documentation: `geon_matter/docs/` (seven topic write-ups),
+`geon_matter/CONSTANTS_AND_PARAMETERS.md` (every constant classified +
+free-parameter analysis vs SM+GR), and `geon_matter/FUTURE_WORK.md` (open items
+with prerequisites and difficulty). This module is the natural staging ground
+for the Section-6 dynamical program — solving the master equation for matter.
+
+---
+
+## 9. Repository
 
 This simulation library lives at <https://github.com/yuliyanlyubenov/PSFT_Simulations>.
 
